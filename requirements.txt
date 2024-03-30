@@ -4,7 +4,7 @@ Pillow==7.0.0
 PyYAML==6.0
 scipy==1.10.1
 tensorboard==2.14.0
-torch==1.12.1+cu113  # or any later versions
+#torch==1.12.1+cu113  # or any later versions
 tqdm==4.66.1
 imageio
 plyfile

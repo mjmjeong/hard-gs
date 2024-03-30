@@ -30,7 +30,8 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
-
+        self.args = args
+        
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -49,6 +50,10 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "cameras_sphere.npz")):
             print("Found cameras_sphere.npz file, assuming DTU data set!")
             scene_info = sceneLoadTypeCallbacks["DTU"](args.source_path, "cameras_sphere.npz", "cameras_sphere.npz")
+        elif os.path.exists(os.path.join(args.source_path, "dataset.json")) and os.path.exists(os.path.join(args.source_path, "covisible")):
+            print("Found dataset.json file & covisible, assuming iphone reality check data set!")
+            scene_info = sceneLoadTypeCallbacks["reality_check"](args.source_path, False, args.eval, args)
+            dataset_type='reality_check'
         elif os.path.exists(os.path.join(args.source_path, "dataset.json")):
             print("Found dataset.json file, assuming Nerfies data set!")
             scene_info = sceneLoadTypeCallbacks["nerfies"](args.source_path, args.eval)
@@ -63,6 +68,8 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["CMU"](args.source_path)
         else:
             assert False, "Could not recognize scene type!"
+
+        self.prompt = scene_info.prompt
 
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply"), 'wb') as dest_file:

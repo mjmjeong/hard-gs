@@ -49,6 +49,9 @@ class ParamGroup:
 
 class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
+        # monocular diffusion
+        self.depth_type = "preprocess"
+        self.flow_intervals = [1,2,4,8,12]
         self.sh_degree = 3
         self.K = 3
         self._source_path = ""
@@ -97,6 +100,8 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
+
+        self.seed = 365
         self.iterations = 80_000
         self.warm_up = 3_000
         self.dynamic_color_warm_up = 20_000
@@ -105,20 +110,32 @@ class OptimizationParams(ParamGroup):
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
         self.deform_lr_max_steps = 40_000
+        # deformation lr
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
-        self.scaling_lr = 0.001
+        self.scaling_lr = 0.001  # 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        # densfication 
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 50_000
+        self.densify_until_iter = 50_000 #TODO: 15_000
         self.densify_grad_threshold = 0.0002
         self.oneupSHdegree_step = 1000
         self.random_bg_color = False
+        # self.weight_constraint_init= 1 # TODO
+        # self.weight_constraint_after = 0.2 # TODO
+        # self.weight_decay_iteration = 5000 # TODO
+        # self.max_gaussian_num = 360_000 # TODO
+        # self.pruning_from_iter = 500 # TODO
+        # self.pruning_interval = 100 # TODO
+        # self.opacity_threshold_coarse = 0.005 # TODO
+        # self.batch_size=1 # TODO
+        # self.add_point=False # TODO
 
+        # Node training
         self.deform_lr_scale = 1.
         self.deform_downsamp_strategy = 'samp_hyper'
         self.deform_downsamp_with_dynamic_mask = False
@@ -150,9 +167,75 @@ class OptimizationParams(ParamGroup):
         self.gt_alpha_mask_as_dynamic_mask = False
         self.no_arap_loss = False  # For large scenes arap is too slow
         self.with_temporal_smooth_loss = False
-
+        
+        # Depth
+        self.lambda_depth = 0.0
+        self.lambda_depth_end = 0.0
+        self.lambda_depth_anneal_start_iter = 0
+        self.lambda_depth_anneal_end_iter = -1
+        self.depth_loss_type = 'mse'
+        self.no_depth_minmax_norm = False
+        self.gt_depth_flip = False
+        
+        # Uncertainty
+        self.use_uncertainty = False
+        self.filter_out_grad = 'rotation'
+        self.uncert_method = 'gradient_alpha_T_depth'
+        self.uncert_normalization = 'log_minmax'
+        self.update_uncert3D_every = 5000
+        
+        # SDS
+        self.sds_vis_interval = 500
+        self.use_sds_cache = False
+        self.sds_cache_interval = 200
+        self.sds_cache_num = 50
+        self.sds_cache_chunk = 10
+        self.lambda_sds = 0.0
+        self.lambda_sds_depth_ratio = 1.0
+        self.lambda_sds_end = 0.0
+        self.sds_interval = 1
+        self.sds_start_iter = -1
+        self.lambda_sds_anneal_start_iter = 0
+        self.lambda_sds_anneal_end_iter = -1
+        self.sds_strength=0.4 # TODO
+        self.sds_strength_end=0.1 # TODO
+        self.sds_strength_anneal_start_iter = 0# TODO
+        self.sds_strength_anneal_end_iter = 10000# TODO
+        self.guidance_scale=3 # TODO
+        self.guidance_step=50# TODO
+        self.diffusion_dir = '/131_data/mijeong/dynamic_nerf/diffusion_finetune/checkpoints/dreambooth_sd_crop_200'
+        
+        # Dynamic region densification
+        self.use_dynamic_region_densification = False
+        self.dynamic_region_densification_type = 2
+        self.dynamic_densification_interval = 500
+        self.densify_dynamic_patch_ratio=0.85
+        self.dynamic_densification_from_iter = 0
+        self.dynamic_densification_end_iter = 4000
+        self.time_aware_densification=False
+        self.emsthr = 0.6
+        #
+        self.densify_dynamic_rgb_threshold = 0.1
+        self.densify_dynamic_rgb_ignore = 0.05
+        self.densify_dynamic_min_percent=-1.0
+        self.densify_dynamic_max_percent=0.2
+        # Flow
+        self.lambda_flow = 0.0
+        self.lambda_flow_end = 0.0
+        self.lambda_flow_anneal_start_iter = 0
+        self.lambda_flow_anneal_end_iter = -1
+        self.flow_start_iter=-1
+        self.flow_hw_scaling = False
         super().__init__(parser, "Optimization Parameters")
 
+class LoggerParams(ParamGroup):
+    def __init__(self, parser):
+        self.no_wandb = False
+        self.wandb_id = None
+        self.wandb_entity = None
+        self.wandb_project = 'debug_dynerf'
+        self.wandb_name = 'default'
+        super().__init__(parser, "Logger Parameters")
 
 def get_combined_args(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]

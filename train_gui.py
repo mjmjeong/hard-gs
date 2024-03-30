@@ -14,7 +14,7 @@ import os
 import time
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, compute_depth_loss, annealing
 from gaussian_renderer import render, network_gui, render_flow
 import sys
 from scene import Scene, GaussianModel, DeformModel
@@ -23,7 +23,8 @@ import uuid
 import tqdm
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-from train import training_report
+from train import training_report, render_training_image
+from utils.timer import Timer 
 import math
 from cam_utils import OrbitCamera
 import numpy as np
@@ -173,6 +174,8 @@ class GUI:
 
         self.iter_start = torch.cuda.Event(enable_timing=True)
         self.iter_end = torch.cuda.Event(enable_timing=True)
+        self.timer = Timer()
+        self.timer.start()
         self.iteration = 1 if self.scene.loaded_iter is None else self.scene.loaded_iter
         self.iteration_node_rendering = 1 if self.scene.loaded_iter is None else self.opt.iterations_node_rendering
 
@@ -1044,6 +1047,14 @@ class GUI:
         total_frame = len(self.scene.getTrainCameras())
         time_interval = 1 / total_frame
 
+        ###################################################################################
+        # SDS Loss: TODO
+        ####################################################################################
+
+
+        ###################################################################################
+        # Deformation: batch
+        ####################################################################################
         viewpoint_cam = self.viewpoint_stack.pop(randint(0, len(self.viewpoint_stack) - 1))
         if self.dataset.load2gpu_on_the_fly:
             viewpoint_cam.load2device()
@@ -1071,13 +1082,20 @@ class GUI:
                 d_xyz, d_rotation, d_scaling, d_opacity, d_color = d_xyz.detach(), d_rotation.detach(), d_scaling.detach(), d_opacity.detach() if d_opacity is not None else None, d_color.detach() if d_color is not None else None
             elif self.iteration < self.opt.dynamic_color_warm_up:
                 d_color = d_color.detach() if d_color is not None else None
-
-        # Render
+                
+        # TODO: Deform: Grid
+        # TODO: Deform: polynomial
+                
+        ###################################################################################
+        # Rendering: Batch
+        ####################################################################################
         random_bg_color = (not self.dataset.white_background and self.opt.random_bg_color) and self.opt.gt_alpha_mask_as_scene_mask and viewpoint_cam.gt_alpha_mask is not None
         render_pkg_re = render(viewpoint_cam, self.gaussians, self.pipe, self.background, d_xyz, d_rotation, d_scaling, random_bg_color=random_bg_color, d_opacity=d_opacity, d_color=d_color, d_rot_as_res=self.deform.d_rot_as_res)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg_re["render"], render_pkg_re["viewspace_points"], render_pkg_re["visibility_filter"], render_pkg_re["radii"]
 
-        # Loss
+        ###################################################################################
+        # GT prepare
+        ####################################################################################
         gt_image = viewpoint_cam.original_image.cuda()
         if random_bg_color:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask.cuda()
@@ -1086,6 +1104,13 @@ class GUI:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask.cuda()
             gt_image = gt_alpha_mask * gt_image + (1 - gt_alpha_mask) * self.background[:, None, None]
 
+        gt_depths = viewpoint_cam.depth
+        if gt_depths is not None:
+            gt_depths = gt_depths.cuda() # single batch
+        
+        ###################################################################################
+        # Loss 1: image loss
+        ####################################################################################
         Ll1 = l1_loss(image, gt_image)
         loss_img = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss = loss_img
@@ -1093,7 +1118,22 @@ class GUI:
         if self.iteration > self.opt.warm_up:
             loss = loss + self.deform.reg_loss
 
-        # Flow loss
+        ###################################################################################
+        # Loss 2: depth loss
+        ####################################################################################
+        if self.opt.lambda_depth > 0 or self.opt.use_dynamic_region_densification:
+            # lambda_depth annealing 
+            lambda_depth = annealing(self.iteration, self.opt.lambda_depth, self.opt.lambda_depth_end, \
+                                     self.opt.lambda_depth_anneal_start_iter, self.opt.lambda_depth_anneal_end_iter)
+            
+            # compute for training & logging
+            render_depths = render_pkg_re['depth'] # single batch
+            depth_loss = compute_depth_loss(render_depths, gt_depths, self.scene, self.opt)
+            loss += lambda_depth * depth_loss
+
+        ###################################################################################
+        # Loss 3: flow loss (render again!)
+        ###################################################################################
         flow_id2_candidates = viewpoint_cam.flow_dirs
         lambda_optical = landmark_interpolate(self.opt.lambda_optical_landmarks, self.opt.lambda_optical_steps, self.iteration)
         if flow_id2_candidates != [] and lambda_optical > 0 and self.iteration >= self.opt.warm_up:
@@ -1138,7 +1178,9 @@ class GUI:
                 optical_flow_loss = l1_loss(mask * coor1to2_flow, mask * coor1to2_motion)
                 loss = loss + lambda_optical * optical_flow_loss
 
-        # Motion Mask Loss
+        ###################################################################################
+        # Loss 4: motion mask loss (render again!)
+        ###################################################################################
         lambda_motion_mask = landmark_interpolate(self.opt.lambda_motion_mask_landmarks, self.opt.lambda_motion_mask_steps, self.iteration)
         if not self.opt.no_motion_mask_loss and self.deform.name == 'node' and self.opt.gt_alpha_mask_as_dynamic_mask and viewpoint_cam.gt_alpha_mask is not None and lambda_motion_mask > 0:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask.cuda()
@@ -1169,6 +1211,7 @@ class GUI:
             self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
 
             # Log and save
+            self.timer.pause()
             cur_psnr, cur_ssim, cur_lpips, cur_ms_ssim, cur_alex_lpips = training_report(self.tb_writer, self.iteration, Ll1, loss, l1_loss, self.iter_start.elapsed_time(self.iter_end), self.testing_iterations, self.scene, render, (self.pipe, self.background), self.deform, self.dataset.load2gpu_on_the_fly, self.progress_bar)
             if self.iteration in self.testing_iterations:
                 if cur_psnr.item() > self.best_psnr:
@@ -1183,7 +1226,13 @@ class GUI:
                 print("\n[ITER {}] Saving Gaussians".format(self.iteration))
                 self.scene.save(self.iteration)
                 self.deform.save_weights(self.args.model_path, self.iteration)
-
+            # Visualization of train / test image
+            if (self.iteration < 20000 and self.iteration % 1000 == 999) \
+                or (self.iteration < 100000 and self.iteration %  5000 == 4999) :
+                render_training_image(self.iteration, self.timer.get_elapsed_time(), self.scene, render, (self.pipe, self.background), self.deform, self.dataset.load2gpu_on_the_fly, type_= "train")
+                render_training_image(self.iteration, self.timer.get_elapsed_time(), self.scene, render, (self.pipe, self.background), self.deform, self.dataset.load2gpu_on_the_fly, type_= "test")
+                    
+            self.timer.start()
             # Densification
             if self.iteration < self.opt.densify_until_iter:
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -1294,6 +1343,23 @@ class GUI:
                 loss_opt_trans = 1e-2 * self.deform.deform.arap_loss()
                 loss = loss + loss_opt_trans
 
+        #################################################
+        #   Depth loss
+        #################################################
+        # depth loss
+        if self.opt.lambda_depth > 0 or self.opt.use_dynamic_region_densification:
+            # lambda_depth annealing 
+            lambda_depth = annealing(self.iteration, self.opt.lambda_depth, self.opt.lambda_depth_end, \
+                                     self.opt.lambda_depth_anneal_start_iter, self.opt.lambda_depth_anneal_end_iter)
+            
+            # compute for training & logging
+            render_depths = render_pkg_re['depth'] # single batch
+            gt_depths = viewpoint_cam.depth
+            if gt_depths is not None:
+                gt_depths = gt_depths.cuda() # single batch
+            depth_loss = compute_depth_loss(render_depths, gt_depths, self.scene, self.opt)
+            loss += lambda_depth * depth_loss
+
         # Motion Mask Loss
         if self.opt.gt_alpha_mask_as_dynamic_mask and self.deform.deform.as_gaussians.with_motion_mask and viewpoint_cam.gt_alpha_mask is not None and self.iteration_node_rendering > self.opt.node_warm_up:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask.cuda()[0]
@@ -1304,6 +1370,11 @@ class GUI:
 
         loss.backward()
         with torch.no_grad():
+            # Visualization of train / test image
+            if self.iteration_node_rendering % 1000 == 999:
+                render_training_image(self.iteration_node_rendering, self.timer.get_elapsed_time(), self.scene, render, (self.pipe, self.background), self.deform, self.dataset.load2gpu_on_the_fly, type_= "train", prefix='node_')
+                render_training_image(self.iteration_node_rendering, self.timer.get_elapsed_time(), self.scene, render, (self.pipe, self.background), self.deform, self.dataset.load2gpu_on_the_fly, type_= "test", prefix='node_')
+
             if self.iteration_node_rendering < self.opt.iterations_node_sampling:
                 # Densification
                 self.deform.deform.as_gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)

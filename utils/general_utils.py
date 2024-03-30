@@ -25,16 +25,21 @@ def PILtoTorch(pil_image, resolution):
         # Process rgb and alpha respectively to avoid mask rgb with alpha
         rgb = Image.fromarray(np.asarray(pil_image)[..., :3])
         a = Image.fromarray(np.asarray(pil_image)[..., 3])
-        rgb, a = np.asarray(rgb.resize(resolution)), np.asarray(a.resize(resolution))
+        if resolution is not None:
+            rgb, a = np.asarray(rgb.resize(resolution)), np.asarray(a.resize(resolution))
+        else:
+            rgb, a = np.asarray(rgb), np.asarray(a)
         resized_image = torch.from_numpy(np.concatenate([rgb, a[..., None]], axis=-1)) / 255.0
     else:
-        resized_image_PIL = pil_image.resize(resolution)
+        if resolution is not None:
+            resized_image_PIL = pil_image.resize(resolution)
+        else:
+            resized_image_PIL = pil_image
         resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
     if len(resized_image.shape) == 3:
         return resized_image.permute(2, 0, 1)
     else:
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
-
 
 def ArrayToTorch(array, resolution):
     # resized_image = np.resize(array, resolution)

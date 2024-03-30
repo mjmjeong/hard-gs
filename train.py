@@ -13,12 +13,17 @@ import os
 import torch
 from scene import Scene
 import uuid
+import numpy as np
+
 from utils.image_utils import psnr, lpips, alex_lpips
 from utils.image_utils import ssim as ssim_func
 from piq import LPIPS
 lpips = LPIPS()
 from argparse import Namespace
 from pytorch_msssim import ms_ssim
+from PIL import Image, ImageDraw, ImageFont
+from matplotlib import pyplot as plt
+plt.rcParams['font.sans-serif'] = ['Times New Roman']
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -27,6 +32,92 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+@torch.no_grad()
+def render_training_image(iteration, time_now, scene: Scene, renderFunc, renderArgs, deform, load2gpu_on_the_fly, type_='train', prefix=""):
+    torch.cuda.empty_cache()
+    
+    ############################################################
+    # select cam
+    ############################################################
+    if type_ == 'train':
+        viewpoints = scene.getTrainCameras()
+    elif type_ == 'test':
+        viewpoints = scene.getTestCameras()
+    
+    np.random.seed(iteration)
+    viewpoint = np.random.choice(viewpoints, 1)[0]
+
+    ############################################################
+    # label
+    ############################################################
+    label1 = f"iter:{iteration}"
+    times =  time_now/60
+    if times < 1:
+        end = "min"
+    else:
+        end = "mins"
+    label2 = "time:%.2f" % times + end
+    
+    render_base_path = os.path.join(scene.model_path, f"images", prefix + str(type_))
+    os.makedirs(render_base_path, exist_ok=True)
+    path = os.path.join(render_base_path, f"{iteration}.jpg")
+
+    ############################################################
+    # rendering
+    ############################################################
+    if load2gpu_on_the_fly:
+        viewpoint.load2device()
+    fid = viewpoint.fid
+    xyz = scene.gaussians.get_xyz
+
+    if deform.name == 'mlp':
+        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
+    elif deform.name == 'node':
+        time_input = deform.deform.expand_time(fid)
+    else:
+        time_input = 0
+
+    d_values = deform.step(xyz.detach(), time_input, feature=scene.gaussians.feature, is_training=False, motion_mask=scene.gaussians.motion_mask, camera_center=viewpoint.camera_center)
+    d_xyz, d_rotation, d_scaling, d_opacity, d_color = d_values['d_xyz'], d_values['d_rotation'], d_values['d_scaling'], d_values['d_opacity'], d_values['d_color']
+    
+    # GT
+    gt_image = torch.clamp(viewpoint.original_image, 0.0, 1.0)
+    gt_image = gt_image.permute(1, 2, 0).cpu().numpy()
+    gt_depth = viewpoint.depth
+    if gt_depth is not None:
+        gt_depth_np = gt_depth.permute(1,2,0).cpu().numpy()
+        gt_depth_np /= gt_depth_np.max()
+        #gt_depth_np = 1 - gt_depth_np
+        gt_depth_np = np.repeat(gt_depth_np, 3, axis=2)
+    
+    # Render
+    render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling, d_opacity=d_opacity, d_color=d_color, d_rot_as_res=deform.d_rot_as_res)           
+    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+    depth = render_pkg["depth"]
+    image_np = image.permute(1, 2, 0).cpu().numpy()  # 转换通道顺序为 (H, W, 3)
+    depth_np = depth.permute(1, 2, 0).cpu().numpy()
+    depth_np /= depth_np.max()
+    depth_np = np.repeat(depth_np, 3, axis=2)
+    
+    if gt_depth is not None:
+        image_np = np.concatenate((gt_image, image_np, gt_depth_np, depth_np), axis=1)
+    else:
+        image_np = np.concatenate((gt_image, image_np, depth_np), axis=1)
+
+    ############################################################
+    # save
+    #############################################################
+    image_with_labels = Image.fromarray((np.clip(image_np,0,1) * 255).astype('uint8')) 
+    draw1 = ImageDraw.Draw(image_with_labels)
+    font = ImageFont.truetype('./utils/TIMES.TTF', size=40)
+    text_color = (255, 0, 0)  # 白色
+
+    label1_position = (10, 10)
+    label2_position = (image_with_labels.width - 100 - len(label2) * 10, 10)  # 右上角坐标
+
+    draw1.text(label1_position, label1, fill=text_color, font=font)
+    draw1.text(label2_position, label2, fill=text_color, font=font)
+    image_with_labels.save(path)
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -116,16 +207,19 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 lpips_test = torch.stack(lpips_list).mean()
                 ms_ssim_test = torch.stack(ms_ssim_list).mean()
                 alex_lpips_test = torch.stack(alex_lpips_list).mean()
+                total_point = scene.gaussians._xyz.shape[0]
+
                 if config['name'] == 'test' or len(validation_configs[0]['cameras']) == 0:
                     test_psnr = psnr_test
                     test_ssim = ssim_test
                     test_lpips = lpips_test
                     test_ms_ssim = ms_ssim_test
                     test_alex_lpips = alex_lpips_test
+                    
                 if progress_bar is None:
-                    print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {} MS SSIM{} ALEX_LPIPS {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test))
+                    print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {} MS SSIM{} ALEX_LPIPS {} NUM {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test, total_point))
                 else:
-                    progress_bar.set_description("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {} MS SSIM {} ALEX_LPIPS {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test))
+                    progress_bar.set_description("\n[ITER {}] Evaluating {}: L1 {} PSNR {} SSIM {} LPIPS {} MS SSIM {} ALEX_LPIPS {} NUM {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test, total_point))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)

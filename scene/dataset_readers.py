@@ -17,6 +17,8 @@ from typing import NamedTuple, Optional
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
+from scene.hyper_loader import Load_hyper_data, format_hyper_data
+
 import numpy as np
 import json
 import imageio
@@ -44,6 +46,8 @@ class CameraInfo(NamedTuple):
     height: int
     fid: float
     depth: Optional[np.array] = None
+    mask: np.array = None
+    flow_cams: dict = None
 
 
 class SceneInfo(NamedTuple):
@@ -52,7 +56,7 @@ class SceneInfo(NamedTuple):
     test_cameras: list
     nerf_normalization: dict
     ply_path: str
-
+    prompt: str = None
 
 def load_K_Rt_from_P(filename, P=None):
     if P is None:
@@ -774,6 +778,70 @@ def readNerfiesInfo(path, eval):
     return scene_info
 
 
+
+def readRealityCheckInfos(datadir,use_bg_points,eval,args=None):
+    train_cam_infos = Load_hyper_data(datadir,0.5,use_bg_points,split ="train",args=args)
+    test_cam_infos = Load_hyper_data(datadir,0.5,use_bg_points,split="test",args=args)
+    print("load finished")
+
+    train_cam = format_hyper_data(train_cam_infos,"train")
+    print("format finished")
+
+    max_time = train_cam_infos.max_time
+    video_cam_infos = copy.deepcopy(test_cam_infos)
+    video_cam_infos.split="video"
+
+    if (not train_cam_infos.depth_is_calibrated):
+        sparse_ply_path = os.path.join(datadir, "colmap/sparse/0/points3D.bin")
+        xyz, rgb, err = read_points3D_binary(sparse_ply_path)
+        storePly('dummy.ply', xyz, rgb, xyzerr=err)
+        pcd = fetchPly('dummy.ply')
+        train_cam_infos.do_depth_calibration(pcd, point_type='sparse')
+        #test_cam_infos.do_depth_calibration(pcd, point_type='sparse')
+    
+        #ply_path = os.path.join(datadir, "points3D_downsample.ply")
+        #pcd = fetchPly(ply_path)    
+        #train_cam_infos.do_depth_calibration(pcd, point_type='dense')
+        #test_cam_infos.do_depth_calibration(pcd, point_type='dense')
+        raise ("CALIBRATED IS FINISHED!!")
+        
+#    XYZ = torch.tensor(pcd.points)
+#    ply_path = os.path.join(datadir, "points3d_downsample.ply")
+    ply_path = os.path.join(datadir, "points3D_downsample.ply")
+
+    if not os.path.exists(ply_path):
+        print(f"Generating point cloud from nerfies...")
+
+        xyz = np.load(os.path.join(datadir, "points.npy"))
+        xyz = (xyz - train_cam_infos['scene_center']) * train_cam_infos['scene_scale']
+        num_pts = xyz.shape[0]
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(
+            shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+
+ #   try:
+ #       pcd = fetchPly(ply_path)
+ #   except:
+ #       pcd = None
+
+    pcd = fetchPly(ply_path)
+    xyz = np.array(pcd.points)
+    pcd = pcd._replace(points=xyz)
+    nerf_normalization = getNerfppNorm(train_cam)
+#    plot_camera_orientations(train_cam_infos, pcd.points)
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           #video_cameras=video_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           prompt=train_cam_infos.prompt
+                           )
+    return scene_info
+
 def readCamerasFromNpy(path, npy_file, split, hold_id, num_images):
     cam_infos = []
     video_paths = sorted(glob(os.path.join(path, 'frames/*')))
@@ -957,4 +1025,5 @@ sceneLoadTypeCallbacks = {
     "plenopticVideo": readPlenopticVideoDataset,
     # Neural 3D dataset in [https://github.com/facebookresearch/Neural_3D_Video]
     "CMU": readCMUSceneInfo,
+    "reality_check": readRealityCheckInfos,
 }

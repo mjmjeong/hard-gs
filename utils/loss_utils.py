@@ -13,7 +13,18 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
+from torchmetrics.functional.regression import pearson_corrcoef
 
+def masked_mean(x, mask):
+    if mask is None:
+        return x.mean()
+    else:
+        eps=1e-6
+        return (x*mask).sum() / mask.sum().clip(eps)
+    
+def lpips_loss(img1, img2, lpips_model):
+    loss = lpips_model(img1,img2)
+    return loss.mean()
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -74,3 +85,55 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+
+def annealing(iteration, start_lambda, end_lambda, anneal_start_iter, anneal_end_iter):
+    if anneal_end_iter < 0:
+        return start_lambda
+    else:
+        assert (start_lambda > end_lambda)
+        assert (anneal_end_iter > anneal_start_iter)
+        slope = -1 * start_lambda/(anneal_end_iter - anneal_start_iter)
+        lambda_ = start_lambda + (iteration - anneal_start_iter) * slope
+        lambda_ = min(lambda_, start_lambda)
+        lambda_ = max(lambda_, end_lambda)
+        return lambda_
+    
+################################################
+# Depth loss
+#################################################
+
+def compute_depth_loss(render_depths, gt_depths, scene, opt):
+                
+    def min_max_norm(depth):
+        return (depth-depth.min()) / (depth.max()-depth.min())
+       
+    if scene.args.depth_type == 'preprocess': 
+        depth_mask = (gt_depths != 0)
+        if opt.depth_loss_type == 'mse':
+            depth_loss = (render_depths- gt_depths)**2
+            depth_loss = masked_mean(depth_loss, depth_mask)
+
+        elif opt.depth_loss_type == 'corrcoef':
+            if not opt.no_depth_minmax_norm:
+                render_depths = min_max_norm(render_depths)
+                gt_depths = min_max_norm(gt_depths)
+
+            depth_flat = render_depths.reshape(-1,1)
+            gt_depth_flat = gt_depths.reshape(-1,1)
+            depth_loss = 1 - pearson_corrcoef(gt_depth_flat, depth_flat)
+    
+    else:
+        if opt.depth_loss_type == 'l1':
+            depth_loss = F.l1_loss(render_depths, gt_depths)
+        
+        elif opt.depth_loss_type == 'corrcoef':
+            if not opt.no_depth_minmax_norm:
+                render_depths = min_max_norm(render_depths)
+                gt_depths = min_max_norm(gt_depths)
+
+            depth_flat = render_depths.reshape(-1,1)
+            gt_depth_flat = gt_depths.reshape(-1,1)
+            
+            depth_loss = 1 - pearson_corrcoef(gt_depth_flat, depth_flat)
+            
+    return depth_loss
