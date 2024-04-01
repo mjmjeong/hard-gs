@@ -232,6 +232,9 @@ class GUI:
         self.should_render_customized_trajectory = False
         self.should_render_customized_trajectory_spiral = False
 
+        #  SDS Loss
+        #self.compute_sds = ComputeSDS(self.opt)
+
         if self.gui:
             dpg.create_context()
             self.register_dpg()
@@ -1049,12 +1052,20 @@ class GUI:
 
         ###################################################################################
         # SDS Loss: TODO
-        ####################################################################################
+        ###################################################################################
+        """
+        lambda_sds = annealing(iteration, opt.lambda_sds, opt.lambda_sds_end, opt.lambda_sds_anneal_start_iter, opt.lambda_sds_anneal_end_iter)
+        if not iteration > opt.sds_start_iter:
+            lambda_sds = 0.0
 
+        sds_strength = annealing(iteration, opt.sds_strength, opt.sds_strength_end, opt.sds_strength_anneal_start_iter, opt.sds_strength_anneal_end_iter)
+        sds_strength = 1 - sds_strength
 
+        loss_sds = self.compute_sds(random_view, target_time)
+        """
         ###################################################################################
         # Deformation: batch
-        ####################################################################################
+        ###################################################################################
         viewpoint_cam = self.viewpoint_stack.pop(randint(0, len(self.viewpoint_stack) - 1))
         if self.dataset.load2gpu_on_the_fly:
             viewpoint_cam.load2device()
@@ -1095,7 +1106,7 @@ class GUI:
 
         ###################################################################################
         # GT prepare
-        ####################################################################################
+        ###################################################################################
         gt_image = viewpoint_cam.original_image.cuda()
         if random_bg_color:
             gt_alpha_mask = viewpoint_cam.gt_alpha_mask.cuda()
@@ -1110,7 +1121,7 @@ class GUI:
         
         ###################################################################################
         # Loss 1: image loss
-        ####################################################################################
+        ###################################################################################
         Ll1 = l1_loss(image, gt_image)
         loss_img = (1.0 - self.opt.lambda_dssim) * Ll1 + self.opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss = loss_img
@@ -1120,7 +1131,7 @@ class GUI:
 
         ###################################################################################
         # Loss 2: depth loss
-        ####################################################################################
+        ###################################################################################
         if self.opt.lambda_depth > 0 or self.opt.use_dynamic_region_densification:
             # lambda_depth annealing 
             lambda_depth = annealing(self.iteration, self.opt.lambda_depth, self.opt.lambda_depth_end, \
@@ -1139,37 +1150,59 @@ class GUI:
         if flow_id2_candidates != [] and lambda_optical > 0 and self.iteration >= self.opt.warm_up:
             # Pick flow file and read it
             flow_id2_dir = np.random.choice(flow_id2_candidates)
-            flow = np.load(flow_id2_dir)
-            mask_id2_dir = flow_id2_dir.replace('raft_neighbouring', 'raft_masks').replace('.npy', '.png')
-            masks = imageio.imread(mask_id2_dir) / 255.
-            flow = torch.from_numpy(flow).float().cuda()
-            masks = torch.from_numpy(masks).float().cuda()
+            if flow_id2_dir.endswith('npy'):
+                flow = np.load(flow_id2_dir)
+                mask_id2_dir = flow_id2_dir.replace('raft_neighbouring', 'raft_masks').replace('.npy', '.png')
+                masks = imageio.imread(mask_id2_dir) / 255.
+                flow = torch.from_numpy(flow).float().cuda()
+                masks = torch.from_numpy(masks).float().cuda()
+            elif flow_id2_dir.endswith('npz'):
+                flow_dict = np.load(flow_id2_dir, allow_pickle=True)
+                gt_flow = flow_dict['flow'] # h,w scale
+                gt_flow_mask = flow_dict['mask']
+                flow = torch.tensor(gt_flow).float().cuda()
+                masks = torch.tensor(gt_flow_mask).float().cuda()
+
             if flow.shape[0] != image.shape[1] or flow.shape[1] != image.shape[2]:
                 flow = torch.nn.functional.interpolate(flow.permute([2, 0, 1])[None], (image.shape[1], image.shape[2]))[0].permute(1, 2, 0)
                 masks = torch.nn.functional.interpolate(masks.permute([2, 0, 1])[None], (image.shape[1], image.shape[2]))[0].permute(1, 2, 0)
             fid1 = viewpoint_cam.fid
-            cam2_id = os.path.basename(flow_id2_dir).split('_')[-1].split('.')[0]
+
+            if flow_id2_dir.endswith('npz'):
+                cam2_id = '0_' + os.path.basename(flow_id2_dir).split('_')[-1]
+                cam2_id = cam2_id.replace('.npz', '.png') 
+            else:
+                cam2_id = os.path.basename(flow_id2_dir).split('_')[-1].split('.')[0]
+
             if not hasattr(self, 'img2cam'):
                 self.img2cam = {cam.image_name: idx for idx, cam in enumerate(self.scene.getTrainCameras().copy())}
+
             if cam2_id in self.img2cam:  # Only considering the case with existing files
                 cam2_id = self.img2cam[cam2_id]
                 viewpoint_cam2 = self.scene.getTrainCameras().copy()[cam2_id]
                 fid2 = viewpoint_cam2.fid
+                
                 # Calculate the GT flow, weight, and mask
+                #coor1to2_flow = flow / torch.tensor(flow.shape[:2][::-1], dtype=torch.float32).cuda()
                 coor1to2_flow = flow / torch.tensor(flow.shape[:2][::-1], dtype=torch.float32).cuda() * 2
-                cycle_consistency_mask = masks[..., 0] > 0
-                occlusion_mask = masks[..., 1] > 0
-                mask_flow = cycle_consistency_mask | occlusion_mask
+
+                #cycle_consistency_mask = masks[..., 0] > 0
+                #occlusion_mask = masks[..., 1] > 0
+                #mask_flow = cycle_consistency_mask | occlusion_mask
+                mask_flow = masks > 0.8
                 pair_weight = torch.clamp(torch.cos((fid1 - fid2).abs() * np.pi / 2), 0.2, 1)
+
                 # Calculate the motion at t2
-                time_input2 = self.deform.deform.expand_time(fid2)
+                time_input2 = fid2.unsqueeze(0).expand(self.gaussians.get_xyz.shape[0], -1) if self.deform.name == 'mlp' else self.deform.deform.expand_time(fid2)
                 ast_noise = 0 if self.dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * self.smooth_term(self.iteration)
                 d_xyz2 = self.deform.step(self.gaussians.get_xyz.detach(), time_input2 + ast_noise, iteration=self.iteration, feature=self.gaussians.feature, motion_mask=self.gaussians.motion_mask, camera_center=viewpoint_cam2.camera_center)['d_xyz']
+                
                 # Render the flow image
                 render_pkg2 = render_flow(pc=self.gaussians, viewpoint_camera1=viewpoint_cam, viewpoint_camera2=viewpoint_cam2, d_xyz1=d_xyz, d_xyz2=d_xyz2, d_rotation1=d_rotation, d_scaling1=d_scaling, scale_const=None)
                 coor1to2_motion = render_pkg2["render"][:2].permute(1, 2, 0)
                 mask_motion = (render_pkg2['alpha'][0] > .9).detach()  # Only optimizing the space with solid points to avoid dilation
                 mask = (mask_motion & mask_flow)[..., None] * pair_weight
+                
                 # Flow loss based on pixel rgb loss
                 l1_loss_weight = (image.detach() - gt_image).abs().mean(dim=0)
                 l1_loss_weight = torch.cos(l1_loss_weight * torch.pi / 2)
@@ -1177,6 +1210,41 @@ class GUI:
                 # Flow mask
                 optical_flow_loss = l1_loss(mask * coor1to2_flow, mask * coor1to2_motion)
                 loss = loss + lambda_optical * optical_flow_loss
+
+                if self.iteration % 2000 == 0:
+                    #flow visualization
+                    from utils.flow import flow_viz
+                    from utils.flow.flow_arrow_viz.flow_vis import show_flow
+                    import cv2
+
+                    img1 = np.array(gt_image.detach().cpu().permute(1,2,0))[:,:,::-1]
+                    render_image = np.array(image.detach().cpu().permute(1,2,0))[:,:,::-1]
+
+                    # 2-1) gt
+                    flow = coor1to2_flow.cpu().numpy() / 2.
+                    flow[:,:,0] *= viewpoint_cam.image_width
+                    flow[:,:,1] *= viewpoint_cam.image_width
+                    gt_flow_viz = flow_viz.flow_to_image(flow)
+                    gt_arrow_viz, _ = show_flow(flow*np.expand_dims(masks.cpu(), axis=-1), gt_flow_viz, img1*255)
+                    gt_arrow_viz_image, _ = show_flow(flow*np.expand_dims(masks.cpu(), axis=-1), img1*255, img1*255)
+
+                    flow_save_dir = os.path.join(self.scene.model_path, "flow_viz")
+                    os.makedirs(flow_save_dir, exist_ok=True)
+                    cv2.imwrite(os.path.join(flow_save_dir, f'iter{self.iteration}_flow.png'), gt_arrow_viz_image)
+                    cv2.imwrite(os.path.join(flow_save_dir, f'iter{self.iteration}_arrow.png'), gt_arrow_viz)
+                    # 2-2) render
+                    np_est_flow = np.array(coor1to2_motion.detach().cpu().numpy()) / 2.
+                    np_est_flow[:,:,0] *= viewpoint_cam.image_width
+                    np_est_flow[:,:,1] *= viewpoint_cam.image_height
+                    est_flow_viz = flow_viz.flow_to_image(np_est_flow)
+
+                    #est_arrow_viz, _ = show_flow(np_est_flow, img1*255, img1)
+                    est_arrow_viz, _ = show_flow(np_est_flow*np.expand_dims(masks.cpu(), axis=-1), est_flow_viz, img1)
+                    est_arrow_viz_image, _ = show_flow(np_est_flow*np.expand_dims(masks.cpu(), axis=-1), render_image*255, render_image)
+                
+                    #est_arrow_viz_mask, _ = show_flow(np_est_flow*np.expand_dims(gt_flow_mask, axis=-1), img1*255, img1)
+                    cv2.imwrite(os.path.join(flow_save_dir, f'iter{self.iteration}_flow_est.png'), est_arrow_viz_image)
+                    cv2.imwrite(os.path.join(flow_save_dir, f'iter{self.iteration}_arrow_est.png'), est_arrow_viz)
 
         ###################################################################################
         # Loss 4: motion mask loss (render again!)

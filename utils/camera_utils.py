@@ -53,6 +53,9 @@ def loadCam(args, id, cam_info, resolution_scale, flow_dirs):
     if resized_image_rgb.shape[0] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
+    if len(flow_dirs) == 0 and cam_info.flow_cams is not None:
+        flow_dirs = list(cam_info.flow_cams.values())
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
