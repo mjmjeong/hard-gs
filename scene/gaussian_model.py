@@ -55,10 +55,21 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
 
+        if 'hyper_dim' in kwargs:
+            self.hyper_dim = kwargs['hyper_dim']
+        else:
+            self.hyper_dim = fea_dim
+        
         self.with_motion_mask = with_motion_mask
+
+        self.use_poly = False 
+        if 'use_poly' in kwargs:
+            self.use_poly = kwargs['use_poly']
+
         if self.with_motion_mask:
             # Masks stored as features
             fea_dim += 1
+
         self.fea_dim = fea_dim
         self.feature = torch.empty(0)
 
@@ -174,29 +185,33 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        # Feature initialization
         self.feature = nn.Parameter(-1e-2 * torch.ones([self._xyz.shape[0], self.fea_dim], dtype=torch.float32).to("cuda:0"), requires_grad=True)
+        if self.use_poly:
+            self.feature.data[..., self.hyper_dim:self.hyper_dim+1] = torch.zeros_like(self.feature[..., self.hyper_dim:self.hyper_dim+1]) # Coord # TODO
+            self.feature.data[..., self.hyper_dim+1:] = torch.zeros_like(self.feature[..., self.hyper_dim+1:]) # poly_fea # TODO
         if self.with_motion_mask:
-            self.feature.data[..., -1] = torch.zeros_like(self.feature[..., -1])
+            self.feature.data[..., -1] = torch.zeros_like(self.feature[..., -1]) # TODO
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-
-        self.spatial_lr_scale = 5
+        self.spatial_lr_scale = training_args.spatial_lr_scale
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr * training_args.feature_ret_lr_scale, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr * self.spatial_lr_scale, "name": "scaling"},
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
         ]
 
+        # TODO: (lr)
         if self.fea_dim >0:
             l.append(
-                {'params': [self.feature], 'lr': training_args.feature_lr, 'name': 'feature'}
+                {'params': [self.feature], 'lr': training_args.feature_lr * training_args.feature_lr_scale, 'name': 'feature'}
             )
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -483,6 +498,8 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
+
+    # Add densification for dynamic region 
 
 class StandardGaussianModel(GaussianModel):
     def __init__(self, sh_degree: int, fea_dim=0, with_motion_mask=True, all_the_same=False):

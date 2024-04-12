@@ -14,7 +14,7 @@ import os
 import time
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, compute_depth_loss, annealing
+from utils.loss_utils import l1_loss, ssim, annealing
 from gaussian_renderer import render, network_gui, render_flow
 import sys
 from scene import Scene, GaussianModel, DeformModel
@@ -34,6 +34,8 @@ import datetime
 from PIL import Image
 from train_gui_utils import DeformKeypoints
 from scipy.spatial.transform import Rotation as R
+# Loss import
+from utils.loss.depth_loss import compute_depth_loss
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -144,12 +146,24 @@ class GUI:
             print(f'Progressive trian is on. Adjusting the iterations node sampling to {self.opt.iterations_node_sampling} and iterations node rendering {self.opt.iterations_node_rendering}')
 
         self.tb_writer = prepare_output_and_logger(dataset)
-        self.deform = DeformModel(K=self.dataset.K, deform_type=self.dataset.deform_type, is_blender=self.dataset.is_blender, skinning=self.args.skinning, hyper_dim=self.dataset.hyper_dim, node_num=self.dataset.node_num, pred_opacity=self.dataset.pred_opacity, pred_color=self.dataset.pred_color, use_hash=self.dataset.use_hash, hash_time=self.dataset.hash_time, d_rot_as_res=self.dataset.d_rot_as_res and not self.dataset.d_rot_as_rotmat, local_frame=self.dataset.local_frame, progressive_brand_time=self.dataset.progressive_brand_time, with_arap_loss=not self.opt.no_arap_loss, max_d_scale=self.dataset.max_d_scale, enable_densify_prune=self.opt.node_enable_densify_prune, is_scene_static=dataset.is_scene_static)
+        self.deform = DeformModel(K=self.dataset.K, deform_type=self.dataset.deform_type, is_blender=self.dataset.is_blender, skinning=self.args.skinning, 
+                                hyper_dim=self.dataset.hyper_dim, node_num=self.dataset.node_num, pred_opacity=self.dataset.pred_opacity, pred_color=self.dataset.pred_color,
+                                use_hash=self.dataset.use_hash, hash_time=self.dataset.hash_time, d_rot_as_res=self.dataset.d_rot_as_res and not self.dataset.d_rot_as_rotmat, 
+                                local_frame=self.dataset.local_frame, progressive_brand_time=self.dataset.progressive_brand_time, with_arap_loss=not self.opt.no_arap_loss, 
+                                max_d_scale=self.dataset.max_d_scale, enable_densify_prune=self.opt.node_enable_densify_prune, is_scene_static=dataset.is_scene_static,
+                                poly_dim=self.args.poly_dim
+                                )
         deform_loaded = self.deform.load_weights(dataset.model_path, iteration=-1)
         self.deform.train_setting(opt)
 
+        # Gaussian intialization
         gs_fea_dim = self.deform.deform.node_num if args.skinning and self.deform.name == 'node' else self.dataset.hyper_dim
-        self.gaussians = GaussianModel(dataset.sh_degree, fea_dim=gs_fea_dim, with_motion_mask=self.dataset.gs_with_motion_mask)
+        if self.deform.name == 'poly': 
+            gs_fea_dim = gs_fea_dim + self.args.poly_dim * 3 + 1 # xyz & time
+            hyper_dim = self.dataset.hyper_dim
+            self.gaussians = GaussianModel(dataset.sh_degree, fea_dim=gs_fea_dim, with_motion_mask=self.dataset.gs_with_motion_mask, use_poly=True, hyper_dim=hyper_dim)
+        else:
+            self.gaussians = GaussianModel(dataset.sh_degree, fea_dim=gs_fea_dim, with_motion_mask=self.dataset.gs_with_motion_mask)
 
         self.scene = Scene(dataset, self.gaussians, load_iteration=-1)
         self.gaussians.training_setup(opt)
@@ -929,8 +943,8 @@ class GUI:
         
         # Calculate the gs position at t0
         t = fid
-        time_input = t.unsqueeze(0).expand(self.gaussians.get_xyz.shape[0], -1) if self.deform.name == 'mlp' else self.deform.deform.expand_time(t)
-        d_values = self.deform.step(self.gaussians.get_xyz.detach(), time_input, feature=self.gaussians.feature, is_training=False, motion_mask=self.gaussians.motion_mask)
+        time_input = t.unsqueeze(0).expand(self.gaussians.get_xyz.shape[0], -1) if self.deform.name in ['mlp', 'poly'] else self.deform.deform.expand_time(t)
+        d_values = self.deform.step(self.gaussians.get_xyz.detach(), time_input, feature=self.gaussians.feature, is_training=False, motion_mask=self.gaussians.motion_mask, iteration=iteration)
         cur_pts = self.gaussians.get_xyz + d_values['d_xyz']
     
         if not os.path.exists(os.path.join(self.args.model_path, 'trajectory_keypoints.pickle')):
@@ -1071,7 +1085,7 @@ class GUI:
             viewpoint_cam.load2device()
         fid = viewpoint_cam.fid
 
-        if self.deform.name == 'mlp' or self.deform.name == 'static':
+        if self.deform.name == 'mlp' or self.deform.name == 'static' or self.deform.name == 'poly':
             if self.iteration < self.opt.warm_up:
                 d_xyz, d_rotation, d_scaling, d_opacity, d_color = 0.0, 0.0, 0.0, 0.0, 0.0
             else:
@@ -1080,6 +1094,7 @@ class GUI:
                 ast_noise = 0 if self.dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * self.smooth_term(self.iteration)
                 d_values = self.deform.step(self.gaussians.get_xyz.detach(), time_input + ast_noise, iteration=self.iteration, feature=self.gaussians.feature, camera_center=viewpoint_cam.camera_center)
                 d_xyz, d_rotation, d_scaling, d_opacity, d_color = d_values['d_xyz'], d_values['d_rotation'], d_values['d_scaling'], d_values['d_opacity'], d_values['d_color']
+
         elif self.deform.name == 'node':
             if not self.deform.deform.inited:
                 print('Notice that warping nodes are initialized with Gaussians!!!')
@@ -1095,7 +1110,6 @@ class GUI:
                 d_color = d_color.detach() if d_color is not None else None
                 
         # TODO: Deform: Grid
-        # TODO: Deform: polynomial
                 
         ###################################################################################
         # Rendering: Batch
@@ -1193,7 +1207,7 @@ class GUI:
                 pair_weight = torch.clamp(torch.cos((fid1 - fid2).abs() * np.pi / 2), 0.2, 1)
 
                 # Calculate the motion at t2
-                time_input2 = fid2.unsqueeze(0).expand(self.gaussians.get_xyz.shape[0], -1) if self.deform.name == 'mlp' else self.deform.deform.expand_time(fid2)
+                time_input2 = fid2.unsqueeze(0).expand(self.gaussians.get_xyz.shape[0], -1) if self.deform.name in ['mlp', 'poly'] else self.deform.deform.expand_time(fid2)
                 ast_noise = 0 if self.dataset.is_blender else torch.randn(1, 1, device='cuda').expand(N, -1) * time_interval * self.smooth_term(self.iteration)
                 d_xyz2 = self.deform.step(self.gaussians.get_xyz.detach(), time_input2 + ast_noise, iteration=self.iteration, feature=self.gaussians.feature, motion_mask=self.gaussians.motion_mask, camera_center=viewpoint_cam2.camera_center)['d_xyz']
                 

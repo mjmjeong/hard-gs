@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.time_utils import DeformNetwork, ControlNodeWarp, StaticNetwork
+from utils.time_utils import DeformNetwork, ControlNodeWarp, StaticNetwork, HashDeformNetwork, PolyDeformNetwork
 import os
 from utils.system_utils import searchForMaxIteration
 from utils.general_utils import get_expon_lr_func
 
 
-model_dict = {'mlp': DeformNetwork, 'node': ControlNodeWarp, 'static': StaticNetwork}
-
-
+model_dict = {'mlp': DeformNetwork, 'node': ControlNodeWarp, 'static': StaticNetwork,
+            'hash': HashDeformNetwork, 'poly': PolyDeformNetwork}
+            
 class DeformModel:
     def __init__(self, deform_type='node', is_blender=False, d_rot_as_res=True, **kwargs):
         self.deform = model_dict[deform_type](is_blender=is_blender, d_rot_as_res=d_rot_as_res, **kwargs).cuda()

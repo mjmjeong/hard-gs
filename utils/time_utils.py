@@ -6,6 +6,7 @@ import pytorch3d.ops
 import numpy as np
 import os
 from utils.deform_utils import cal_connectivity_from_points, cal_arap_error, arap_deformation_loss
+from scene.hexplane import HexPlaneField
 
 try:
     from torch_batch_svd import svd
@@ -766,6 +767,52 @@ class HashDeformNetwork(nn.Module):
     def update(self, global_step):
         self.hashgrid.update_step(global_step=global_step)
 
+class PolyDeformNetwork(nn.Module):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__()
+        self.name = 'poly'
+        self.param = nn.Parameter(torch.zeros([1]).cuda())
+        self.reg_loss = 0.
+        self.poly_start = kwargs['hyper_dim']
+        self.poly_dim = kwargs['poly_dim']
+        # PolyMask => MLP?
+    
+    def forward(self, x, t, feature, is_training=True, **kwargs):
+        # split feature
+        poly_params = feature[:, self.poly_start:]
+        poly_center = poly_params[:, :1] # 1: time
+        trans_coeff = poly_params[:, 1:1+self.poly_dim*3]
+
+        # time
+        offset = t - torch.zeros_like(poly_center)# N x 1
+        offset = offset / torch.exp(0.7 *torch.ones_like(offset))
+
+        # polynomial (coeff & time => defom)
+        def polynomial_func(coeff, offset, coord_dim, poly_dim):
+            offset = offset.repeat(1, coord_dim) # N x 3 (xyz)
+            deform = 0.
+            for i in range(poly_dim):
+                curr_coeff = coeff[:, coord_dim*i:coord_dim*(i+1)]
+                deform += curr_coeff * (offset**(i+1))
+            return deform
+
+        trans_coeff = torch.nan_to_num(trans_coeff)
+        translate = polynomial_func(trans_coeff, offset.detach(), 3, self.poly_dim)
+
+        if kwargs['iteration'] != 0 and kwargs['iteration'] % 100 == 0:
+            print(kwargs['iteration'], poly_center.mean().item(), offset.mean().item(), translate.mean().item())
+        
+        return_dict = {'d_xyz': translate, 'd_rotation': 0., 'd_scaling': 0., 'hidden': 0., 'd_opacity':0., 'd_color': 0.}
+        
+        #if self.local_frame: # TODO
+        #    return_dict['local_rotation'] = self.local_rotation_layer(hidden)       
+        return return_dict
+
+    def trainable_parameters(self):
+        return [{'params': [self.param], 'name': 'deform'}]
+    
+    def update(self, *args, **kwargs):
+        return
 
 class ControlNodeWarp(nn.Module):
     def __init__(self, is_blender, init_pcl=None, node_num=512, K=3, use_hash=False, hash_time=False, enable_densify_prune=False, pred_opacity=False, pred_color=False, with_arap_loss=False, with_node_weight=True, local_frame=False, d_rot_as_res=True, skinning=False, hyper_dim=2, progressive_brand_time=False, max_d_scale=-1, is_scene_static=False, **kwargs):

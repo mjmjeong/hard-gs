@@ -80,6 +80,10 @@ class ModelParams(ParamGroup):
         self.as_gs_force_with_motion_mask = False  # Only for scenes with both static and dynamic parts and without alpha mask
         self.max_d_scale = -1.
         self.is_scene_static = False
+        self.poly_dim = 3
+        #################################
+        # Poly
+        ##################################
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -105,6 +109,7 @@ class OptimizationParams(ParamGroup):
         self.iterations = 80_000
         self.warm_up = 3_000
         self.dynamic_color_warm_up = 20_000
+        self.spatial_lr_scale = 5. # TODO
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -112,11 +117,14 @@ class OptimizationParams(ParamGroup):
         self.deform_lr_max_steps = 40_000
         # deformation lr
         self.feature_lr = 0.0025
+        self.feature_ret_lr_scale = 0.05 #0.04
         self.opacity_lr = 0.05
         self.scaling_lr = 0.001  # 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        # feature
+        self.feature_lr_scale = 0.04 # TODO
         # densfication 
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
