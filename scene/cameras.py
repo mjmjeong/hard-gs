@@ -16,7 +16,7 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 
 
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask, image_name, uid, trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, depth=None, flow_dirs=[]):
+    def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask, image_name, uid, trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device="cuda", fid=None, depth=None, flow_dirs=[], scene_flow=None, mask=None):
         super(Camera, self).__init__()
 
         self.uid = uid
@@ -40,12 +40,17 @@ class Camera(nn.Module):
         self.image_width = self.original_image.shape[2]
         self.image_height = self.original_image.shape[1]
         self.depth = torch.Tensor(depth).to(self.data_device) if depth is not None else None
-        self.gt_alpha_mask = gt_alpha_mask
 
+        self.gt_alpha_mask = gt_alpha_mask
         if gt_alpha_mask is not None:
             self.gt_alpha_mask = self.gt_alpha_mask.to(self.data_device)
             # self.original_image *= gt_alpha_mask.to(self.data_device)
 
+        self.scene_flow  = scene_flow
+        if scene_flow is not None: 
+            self.scene_flow = torch.Tensor(self.scene_flow).to(self.data_device)
+
+        self.mask = mask
         self.zfar = 100.0
         self.znear = 0.01
 

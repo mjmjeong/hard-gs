@@ -36,6 +36,7 @@ class CameraInfo(NamedTuple):
     mask: np.array = None
     depth: np.array = None
     flow_cams: dict = None
+    scene_flow: np.array = None
 
 class Load_hyper_data(Dataset):
     def __init__(self, 
@@ -56,6 +57,7 @@ class Load_hyper_data(Dataset):
         with open(f'{datadir}/dataset.json', 'r') as f:
             dataset_json = json.load(f)
 
+        self.use_scene_flow = args.use_scene_flow
         self.flow_intervals = args.flow_intervals
         self.near = scene_json['near']
         self.far = scene_json['far']
@@ -116,10 +118,21 @@ class Load_hyper_data(Dataset):
             elif self.depth_type == 'preprocess':
                 self.all_depth = [f'{datadir}/depth/1x/{i}.npy' for i in self.all_img] # TODO
                 self.depth_is_calibrated = True
-
+            elif self.depth_type == 'sequence':
+                self.all_depth = [f'{datadir}/sequence_depth/{i}.npz' for i in self.all_img] # TODO
+                #self.all_depth = [f'/131_data/mijeong/dynamic-cvd-colmap/output_test/spin/sequence_depth/{i}.npz' for i in self.all_img] # TODO
+                self.depth_is_calibrated = True
         else:
             self.all_depth = [f'{datadir}/midas_depth/{int(1/ratio)}x/{i}-dpt_beit_large_512.png' for i in self.all_img]
             self.depth_is_calibrated = False
+
+        if self.use_scene_flow:
+            if self.split == 'train':
+                # TODO
+                #self.all_sequence_infos = [f'/131_data/mijeong/dynamic-cvd-colmap/output_test/spin/sequence_depth/{i}.npz' for i in self.all_img]
+                self.all_sequence_infos = [f'{datadir}/sequence_depth/{i}.npz' for i in self.all_img]
+            else:
+                self.all_sequence_infos = None
 
         self.all_img = [f'{datadir}/rgb/{int(1/ratio)}x/{i}.png' for i in self.all_img]
 
@@ -138,6 +151,17 @@ class Load_hyper_data(Dataset):
             string = file.readlines()
             file.close()
         self.prompt = string[0].replace('\n','')        
+
+    def load_scene_flow(self, idx):
+        if self.all_sequence_infos is None:
+            return None
+
+        sequence_data = np.load(self.all_sequence_infos[idx], allow_pickle=True)
+        scene_flow = sequence_data['sf_1_2']
+
+        scene_scale = 0.4 # TODO
+        scene_flow *= scene_scale
+        return scene_flow
 
     def load_flow_cams(self,idx):
         image_name = self.all_img[idx].split("/")[-1]
@@ -242,6 +266,10 @@ class Load_hyper_data(Dataset):
                     depth = torch.tensor(depth).to(torch.float32)
                     depth = depth.permute(2,0,1).unsqueeze(0) #1,1,H,W
                     depth = F.interpolate(depth, (h,w))[0]
+            elif self.all_depth[idx].endswith('.npz'):
+                if self.depth_type == 'sequence':
+                    depth_data = np.load(self.all_depth[idx], allow_pickle=True)
+                    depth = torch.tensor(depth_data['depth'])[0]
             else:
                 depth = Image.open(self.all_depth[idx])
                 depth = PILtoTorch(depth,None)
@@ -259,10 +287,11 @@ class Load_hyper_data(Dataset):
             mask = None
 
         flow_cams = self.load_flow_cams(idx)
-        
+        scene_flow = self.load_scene_flow(idx)
+
         caminfo = CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=w, height=h, fid=time, mask=mask,
-                              depth=depth, flow_cams=flow_cams,
+                              depth=depth, flow_cams=flow_cams, scene_flow=scene_flow
                               )
         self.map[idx] = caminfo
         return caminfo  

@@ -51,6 +51,7 @@ class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         # monocular diffusion
         self.depth_type = "preprocess"
+        self.use_scene_flow=False
         self.flow_intervals = [1,2,4,8,12]
         self.sh_degree = 3
         self.K = 3
@@ -78,12 +79,15 @@ class ModelParams(ParamGroup):
         self.gs_with_motion_mask = False
         self.init_isotropic_gs_with_all_colmap_pcl = False
         self.as_gs_force_with_motion_mask = False  # Only for scenes with both static and dynamic parts and without alpha mask
+        self.init_gs_with_dynamic_mask = False # init dynamic mask of gaussians
         self.max_d_scale = -1.
         self.is_scene_static = False
         self.poly_dim = 3
         #################################
         # Poly
         ##################################
+        self.pcd_path = "ply_files/points3D_downsample.ply"
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -170,12 +174,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_motion_mask_landmarks = [5e-1,      1e-2,      0]
         self.lambda_motion_mask_steps =     [0,       10_000, 10_001]
         self.no_motion_mask_loss = False  # Camera pose may be inaccurate and should model the whole scene motion
+        self.motion_lambda = 1.0
 
         self.gt_alpha_mask_as_scene_mask = False
         self.gt_alpha_mask_as_dynamic_mask = False
+        self.gt_scene_flow_as_dynamic_mask = False
         self.no_arap_loss = False  # For large scenes arap is too slow
         self.with_temporal_smooth_loss = False
-        
+        # minor
+        self.viz_space_time_interval = -1        
         # Depth
         self.lambda_depth = 0.0
         self.lambda_depth_end = 0.0
@@ -184,7 +191,8 @@ class OptimizationParams(ParamGroup):
         self.depth_loss_type = 'mse'
         self.no_depth_minmax_norm = False
         self.gt_depth_flip = False
-        
+        self.no_depth_loss_node_training = False
+        self.node_training_detach_dynamic_mask = False
         # Uncertainty
         self.use_uncertainty = False
         self.filter_out_grad = 'rotation'
@@ -228,12 +236,14 @@ class OptimizationParams(ParamGroup):
         self.densify_dynamic_min_percent=-1.0
         self.densify_dynamic_max_percent=0.2
         # Flow
+        self.no_flow_loss = False
         self.lambda_flow = 0.0
         self.lambda_flow_end = 0.0
         self.lambda_flow_anneal_start_iter = 0
         self.lambda_flow_anneal_end_iter = -1
         self.flow_start_iter=-1
         self.flow_hw_scaling = False
+        
         super().__init__(parser, "Optimization Parameters")
 
 class LoggerParams(ParamGroup):
@@ -243,6 +253,7 @@ class LoggerParams(ParamGroup):
         self.wandb_entity = None
         self.wandb_project = 'debug_dynerf'
         self.wandb_name = 'default'
+        self.wandb_tags = []        
         super().__init__(parser, "Logger Parameters")
 
 def get_combined_args(parser: ArgumentParser):

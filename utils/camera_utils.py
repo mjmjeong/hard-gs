@@ -61,7 +61,9 @@ def loadCam(args, id, cam_info, resolution_scale, flow_dirs):
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id,
                   data_device=args.data_device if not args.load2gpu_on_the_fly else 'cpu', fid=cam_info.fid,
-                  depth=cam_info.depth, flow_dirs=flow_dirs)
+                  depth=cam_info.depth, flow_dirs=flow_dirs, 
+                  scene_flow=cam_info.scene_flow,
+                  mask=cam_info.mask)
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, flow_dirs_list=None):

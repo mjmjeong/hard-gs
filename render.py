@@ -19,7 +19,9 @@ import torchvision
 from utils.general_utils import safe_state
 from utils.pose_utils import pose_spherical
 from argparse import ArgumentParser
-from arguments import ModelParams, PipelineParams, get_combined_args, OptimizationParams
+from arguments import ModelParams, PipelineParams, get_combined_args, OptimizationParams, LoggerParams
+
+import csv
 from gaussian_renderer import GaussianModel
 import imageio
 import numpy as np
@@ -28,17 +30,24 @@ from piq import LPIPS
 lpips = LPIPS()
 from utils.image_utils import ssim as ssim_func
 from utils.image_utils import psnr, lpips, alex_lpips
+from pathlib import Path
+from time import time
 
-
-def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform):
+def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save=False, csv_path=None):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
 
-    makedirs(render_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
-    makedirs(depth_path, exist_ok=True)
+    if not skip_image_save:
+        makedirs(render_path, exist_ok=True)
+        makedirs(gts_path, exist_ok=True)
+        makedirs(depth_path, exist_ok=True)
 
+    if csv_path is not None:
+        exp_name = Path(model_path).name
+        csv_dir = Path(csv_path).parent.absolute()
+        makedirs(csv_dir, exist_ok=True)
+    times = []
     # Measurement
     psnr_list, ssim_list, lpips_list = [], [], []
     ms_ssim_list, alex_lpips_list = [], []
@@ -50,6 +59,9 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
             view.load2device()
         fid = view.fid
         xyz = gaussians.get_xyz
+
+        time1=time()
+
         if deform.name == 'mlp':
             time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
         elif deform.name == 'node':
@@ -57,6 +69,9 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
         d_values = deform.step(xyz.detach(), time_input, feature=gaussians.feature, motion_mask=gaussians.motion_mask)
         d_xyz, d_rotation, d_scaling, d_opacity, d_color = d_values['d_xyz'], d_values['d_rotation'], d_values['d_scaling'], d_values['d_opacity'], d_values['d_color']
         results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, d_opacity=d_opacity, d_color=d_color, d_rot_as_res=deform.d_rot_as_res)
+        time2=time()
+        times.append(time2-time1)
+
         alpha = results["alpha"]
         rendering = torch.clamp(torch.cat([results["render"], alpha]), 0.0, 1.0)
 
@@ -74,11 +89,18 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
         depth = depth / (depth.max() + 1e-5)
 
         gt = view.original_image[0:4, :, :]
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
-    renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
-    imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
+        if not skip_image_save:
+            torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+            renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
+            imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
+
+
+    times = times[1:]
+    fps_mean1 = len(times) / np.sum(times)
+    fps_mean2 = np.mean([1/t for t in times])
+    print("FPS:",fps_mean1, fps_mean2)
 
     # Measurement
     psnr_test = torch.stack(psnr_list).mean()
@@ -86,10 +108,45 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
     lpips_test = torch.stack(lpips_list).mean()
     ms_ssim_test = torch.stack(ms_ssim_list).mean()
     alex_lpips_test = torch.stack(alex_lpips_list).mean()
+
+    if csv_path is not None:
+        fieldnames = ['exp', 'stage', 'iteration','FPS', 'pts_num', 'psnr', 'ssim', 'lpips', 'ms_ssim', 'alex_lpips']
+        if not os.path.isfile(csv_path):
+            with open(csv_path, 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow({
+                                'exp': exp_name, 
+                                'stage': name, 
+                                'iteration': iteration,
+                                'FPS': fps_mean1,
+                                'pts_num': gaussians.get_xyz.size(0),
+                                'psnr': psnr_test.item(),
+                                'ssim': ssim_test.item(),
+                                'lpips': lpips_test.item(),
+                                'ms_ssim': ms_ssim_test.item(),
+                                'alex_lpips': alex_lpips_test.item()
+                                })
+        else:
+            with open(csv_path, 'a', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames )
+                writer.writerow({
+                                'exp': exp_name, 
+                                'stage': name, 
+                                'iteration': iteration,
+                                'FPS': fps_mean1,
+                                'pts_num': gaussians.get_xyz.size(0),
+                                'psnr': psnr_test.item(),
+                                'ssim': ssim_test.item(),
+                                'lpips': lpips_test.item(),
+                                'ms_ssim': ms_ssim_test.item(),
+                                'alex_lpips': alex_lpips_test.item()
+                                })
+
     print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {} MS SSIM{} ALEX_LPIPS {}".format(iteration, name, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test))
 
 
-def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy', csv_path='dummy'):
     render_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "depth")
 
@@ -124,7 +181,7 @@ def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, ga
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform):
+def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy',  csv_path='dummy'):
     render_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "depth")
 
@@ -170,7 +227,7 @@ def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gau
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, mode: str, load2device_on_the_fly=False):
+def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, mode: str, load2device_on_the_fly=False, skip_image_save=False, csv_path=None):
     with torch.no_grad():
         
         deform = DeformModel(K=dataset.K, deform_type=dataset.deform_type, is_blender=dataset.is_blender, skinning=dataset.skinning, hyper_dim=dataset.hyper_dim, node_num=dataset.node_num, pred_opacity=dataset.pred_opacity, pred_color=dataset.pred_color, use_hash=dataset.use_hash, hash_time=dataset.hash_time, d_rot_as_res=dataset.d_rot_as_res, local_frame=dataset.local_frame, progressive_brand_time=dataset.progressive_brand_time, max_d_scale=dataset.max_d_scale)
@@ -191,10 +248,10 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
             render_func = interpolate_all
 
         if not skip_train:
-            render_func(dataset.model_path, load2device_on_the_fly, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, deform)
+            render_func(dataset.model_path, load2device_on_the_fly, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, deform, skip_image_save, csv_path=csv_path)
 
         if not skip_test:
-            render_func(dataset.model_path, load2device_on_the_fly, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, deform)
+            render_func(dataset.model_path, load2device_on_the_fly, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, deform, skip_image_save, csv_path=csv_path)
 
 
 if __name__ == "__main__":
@@ -203,9 +260,13 @@ if __name__ == "__main__":
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
     op = OptimizationParams(parser)
+    logp = LoggerParams(parser)
+
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--skip_image_save", action="store_true")    
+    parser.add_argument("--csv_path", type=str)    
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     
@@ -233,4 +294,5 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, load2device_on_the_fly=args.load2gpu_on_the_fly)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, load2device_on_the_fly=args.load2gpu_on_the_fly,
+                skip_image_save=args.skip_image_save, csv_path=args.csv_path)

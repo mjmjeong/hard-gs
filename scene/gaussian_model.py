@@ -153,7 +153,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float=5., print_info=True, max_point_num=150_000):
+    def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float=5., print_info=True, max_point_num=150_000, motion_mask_scale=5.0):
         self.spatial_lr_scale = 5
         if type(pcd.points) == np.ndarray:
             fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
@@ -190,9 +190,17 @@ class GaussianModel:
         if self.use_poly:
             self.feature.data[..., self.hyper_dim:self.hyper_dim+1] = torch.zeros_like(self.feature[..., self.hyper_dim:self.hyper_dim+1]) # Coord # TODO
             self.feature.data[..., self.hyper_dim+1:] = torch.zeros_like(self.feature[..., self.hyper_dim+1:]) # poly_fea # TODO
-        if self.with_motion_mask:
-            self.feature.data[..., -1] = torch.zeros_like(self.feature[..., -1]) # TODO
 
+        if self.with_motion_mask:
+            if pcd.dynamic_mask is None:
+                self.feature.data[..., -1] = torch.zeros_like(self.feature[..., -1])
+            else:
+                if pcd.dynamic_mask.sum() > 0: # 
+                    d_mask = (pcd.dynamic_mask - 0.5)*2 * motion_mask_scale  #0~1 => -1 ~ 1
+                    self.feature.data[..., -1] = torch.tensor(d_mask)
+                else:
+                    self.feature.data[..., -1] = torch.zeros_like(self.feature[..., -1])
+                
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")

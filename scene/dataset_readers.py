@@ -46,9 +46,9 @@ class CameraInfo(NamedTuple):
     height: int
     fid: float
     depth: Optional[np.array] = None
-    mask: np.array = None
+    visible_mask: np.array = None
     flow_cams: dict = None
-
+    scene_flow: np.array = None
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -181,7 +181,8 @@ def fetchPly(path):
     colors = np.vstack([vertices['red'], vertices['green'],
                         vertices['blue']]).T / 255.0
     normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+    dynamic_mask = vertices['dynamic_mask'] if 'dynamic_mask' in vertices else None
+    return BasicPointCloud(points=positions, colors=colors, normals=normals, dynamic_mask=dynamic_mask)
 
 
 def storePly(path, xyz, rgb):
@@ -805,10 +806,11 @@ def readRealityCheckInfos(datadir,use_bg_points,eval,args=None):
         #test_cam_infos.do_depth_calibration(pcd, point_type='dense')
         raise ("CALIBRATED IS FINISHED!!")
         
-#    XYZ = torch.tensor(pcd.points)
-#    ply_path = os.path.join(datadir, "points3d_downsample.ply")
-    ply_path = os.path.join(datadir, "points3D_downsample.ply")
+    ply_path = os.path.join(datadir, args.pcd_path)
 
+    if not os.path.exists(ply_path):
+        raise FileNotFoundError(f"check ply file path: {ply_path}")
+    """
     if not os.path.exists(ply_path):
         print(f"Generating point cloud from nerfies...")
 
@@ -820,7 +822,7 @@ def readRealityCheckInfos(datadir,use_bg_points,eval,args=None):
             shs), normals=np.zeros((num_pts, 3)))
 
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
-
+    """
  #   try:
  #       pcd = fetchPly(ply_path)
  #   except:
@@ -828,7 +830,13 @@ def readRealityCheckInfos(datadir,use_bg_points,eval,args=None):
 
     pcd = fetchPly(ply_path)
     xyz = np.array(pcd.points)
-    pcd = pcd._replace(points=xyz)
+    if pcd.dynamic_mask is None: 
+        dynamic_mask = np.zeros_like(xyz[:,0]) # All dynamics
+    else:
+        dynamic_mask = np.array(pcd.dynamic_mask)
+    
+    pcd = pcd._replace(points=xyz, dynamic_mask=dynamic_mask)
+
     nerf_normalization = getNerfppNorm(train_cam)
 #    plot_camera_orientations(train_cam_infos, pcd.points)
 

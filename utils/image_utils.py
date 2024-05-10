@@ -27,11 +27,55 @@ def alex_lpips(image1, image2):
 def mse(img1, img2):
     return (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
 
+#def psnr(img1, img2):
+#    mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+#    return 20 * torch.log10(1.0 / torch.sqrt(mse))
+    
+@torch.no_grad()
+def psnr(img1, img2, mask=None):
+    
+    if mask is not None:
+#      if img1.size() == 4:
+#            img1.
+#        img1 = img1.flatten(1)
+#        img2 = img2.flatten(1)       
+#        mask = mask.flatten(1)       
+        mask = torch.where(mask!=0,True,False)
+        img1 = img1[mask].unsqueeze(0)
+        img2 = img2[mask].unsqueeze(0)
+        mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
 
-def psnr(img1, img2):
-    mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
-    return 20 * torch.log10(1.0 / torch.sqrt(mse))
-
+    else:
+        mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+    psnr = 20 * torch.log10(1.0 / torch.sqrt(mse.float()))
+    
+    if mask is not None:
+        if torch.isinf(psnr).any():
+            print(mse.mean(),psnr.mean())
+            psnr = 20 * torch.log10(1.0 / torch.sqrt(mse.float()))
+            psnr = psnr[~torch.isinf(psnr)]
+            
+    return psnr
 
 from piq import ssim, LPIPS
 lpips = LPIPS()
+
+def add_edge(image, e=7):
+    assert image.size(-3) == 3
+    image[...,0,:e,:] = 1    
+    image[...,1,:e,:] = 0
+    image[...,2,:e,:] = 0
+
+    image[...,0,-e:,:] = 1
+    image[...,1,-e:,:] = 0
+    image[...,2,-e:,:] = 0
+    
+    image[...,0,:,:e] = 1
+    image[...,1,:,:e] = 0
+    image[...,2,:,:e] = 0
+    
+    image[...,0,:,-e:] = 1
+    image[...,1,:,-e:] = 0
+    image[...,2,:,-e:] = 0
+#        raise NotImplementedError("check image dimension (add red edge)")
+    return image

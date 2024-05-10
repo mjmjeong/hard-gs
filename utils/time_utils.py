@@ -832,6 +832,7 @@ class ControlNodeWarp(nn.Module):
         self.pred_color = pred_color
         self.max_d_scale = max_d_scale
         self.is_scene_static = is_scene_static
+        self._check = 'tes'
         
         self.skinning = skinning  # As skin model, discarding KNN weighting
         if with_arap_loss and not self.is_scene_static:
@@ -856,7 +857,7 @@ class ControlNodeWarp(nn.Module):
             if self.with_node_weight:
                 self._node_weight = nn.Parameter(torch.zeros_like(self.nodes[:, :1]), requires_grad=with_node_weight)
         if init_pcl is not None:
-            self.init(init_pcl)
+                        self.init(init_pcl)
 
         # Node colors for visualization
         self.nodes_color_visualization = torch.ones_like(self.nodes)
@@ -933,7 +934,6 @@ class ControlNodeWarp(nn.Module):
     def init(self, opt, init_pcl, hyper_pcl=None, keep_all=False, force_init=False, as_gs_force_with_motion_mask=False, force_gs_keep_all=False, reset_bbox=True, **kwargs):
         # keep_all: initialize nodes with all init_pcl given. it happens when sample nodes from the isotropic Gaussians right after the node training
         # force_gs_keep_all: initialize isotropic Gaussians with all init_pcl given. it happens in the very beginning of the training.
-
         # Initialize Nodes
         if self.inited and not force_init:
             return
@@ -965,10 +965,16 @@ class ControlNodeWarp(nn.Module):
                 self._node_radius.data = nn.Parameter(torch.log(.1 * scene_range + 1e-7) * torch.ones([self.node_num]).float().to(scene_range.device))
                 self._node_weight.data = torch.zeros_like(torch.zeros_like(self.nodes[:, :1]))
         self.gs = None
-        if force_gs_keep_all:
-            self.init_gaussians(init_pcl=init_pcl, with_motion_mask=as_gs_force_with_motion_mask)
+
+        if 'dynamic_mask' in kwargs.keys():
+            dynamic_mask = kwargs['dynamic_mask']
         else:
-            self.init_gaussians(init_pcl=self.nodes[..., :3],with_motion_mask=as_gs_force_with_motion_mask)
+            dynamic_mask = None
+        
+        if force_gs_keep_all:
+            self.init_gaussians(init_pcl=init_pcl, dynamic_mask=dynamic_mask, with_motion_mask=as_gs_force_with_motion_mask)
+        else:
+            self.init_gaussians(init_pcl=self.nodes[..., :3], dynamic_mask=dynamic_mask, with_motion_mask=as_gs_force_with_motion_mask)
         self.as_gaussians.training_setup(opt)
         print(f'Control node initialized with {self.nodes.shape[0]} from {init_pcl.shape[0]} points.')
         return init_nodes_idx
@@ -1292,14 +1298,18 @@ class ControlNodeWarp(nn.Module):
             self.gs._xyz.data = self.nodes[..., :3]
         return self.gs
     
-    def init_gaussians(self, init_pcl, with_motion_mask):
+    def init_gaussians(self, init_pcl, with_motion_mask, dynamic_mask=None):
         if not hasattr(self, 'gs') or self.gs is None:
             # Building Learnable Gaussians for Nodes
             print('Initialize Learnable Gaussians for Nodes with Point Clouds!')
             from scene.gaussian_model import GaussianModel, BasicPointCloud, StandardGaussianModel
-            pcd = BasicPointCloud(points=init_pcl.detach(), colors=torch.zeros_like(init_pcl), normals=torch.zeros_like(init_pcl))
+            if dynamic_mask is not None and with_motion_mask:
+                dynamic_mask = torch.round(dynamic_mask.detach())[:,0]
+                pcd = BasicPointCloud(points=init_pcl.detach(), colors=torch.zeros_like(init_pcl), normals=torch.zeros_like(init_pcl),dynamic_mask=torch.round(dynamic_mask.detach())) #0~1
+            else:
+                pcd = BasicPointCloud(points=init_pcl.detach(), colors=torch.zeros_like(init_pcl), normals=torch.zeros_like(init_pcl))
             self.gs = StandardGaussianModel(sh_degree=0, all_the_same=True, with_motion_mask=with_motion_mask)  # blender datas are all dynamic
-            self.gs.create_from_pcd(pcd=pcd, spatial_lr_scale=0., print_info=False)
+            self.gs.create_from_pcd(pcd=pcd, spatial_lr_scale=0., print_info=False, motion_mask_scale=5.0)
         return self.gs
     
     @property
