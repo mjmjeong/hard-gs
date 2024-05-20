@@ -130,6 +130,7 @@ class OptimizationParams(ParamGroup):
         # feature
         self.feature_lr_scale = 0.04 # TODO
         # densfication 
+        self.max_guassian_num = 100000
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500

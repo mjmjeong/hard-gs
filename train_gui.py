@@ -1344,9 +1344,8 @@ class GUI:
                     
             self.timer.start()
             # Densification
-            if self.iteration < self.opt.densify_until_iter:
+            if self.iteration < self.opt.densify_until_iter and (self.gaussians._xyz.size(0) < self.opt.max_gaussian_num):
                 self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
                 if self.iteration > self.opt.node_densify_from_iter and self.iteration % self.opt.node_densification_interval == 0 and self.iteration < self.opt.node_densify_until_iter and self.iteration > self.opt.warm_up or self.iteration == self.opt.node_force_densify_prune_step:
                     # Nodes densify
                     self.deform.densify(max_grad=self.opt.densify_grad_threshold, x=self.gaussians.get_xyz, x_grad=self.gaussians.xyz_gradient_accum / self.gaussians.denom, feature=self.gaussians.feature, force_dp=(self.iteration == self.opt.node_force_densify_prune_step))
