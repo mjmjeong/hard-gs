@@ -32,25 +32,37 @@ from utils.image_utils import ssim as ssim_func
 from utils.image_utils import psnr, lpips, alex_lpips
 from pathlib import Path
 from time import time
+# iphone
+from thirdparty.dycheck.core import metrics
+from utils.loss_utils import l1_loss, ssim, l2_loss, lpips_loss, masked_mean
+import jax.numpy as jnp
+compute_lpips = metrics.get_compute_lpips() 
 
-def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save=False, csv_path=None):
+def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save=False, skip_measure=False):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
+
 
     if not skip_image_save:
         makedirs(render_path, exist_ok=True)
         makedirs(gts_path, exist_ok=True)
         makedirs(depth_path, exist_ok=True)
 
-    if csv_path is not None:
-        exp_name = Path(model_path).name
-        csv_dir = Path(csv_path).parent.absolute()
-        makedirs(csv_dir, exist_ok=True)
+    # measure
+    if not skip_measure:
+        csv_path = os.path.join(model_path, 'result.csv')
+    exp_name = Path(model_path).name
+    #if csv_path is not None:
+    #    
+    #    csv_dir = Path(csv_path).parent.absolute()
+    #    makedirs(csv_dir, exist_ok=True)
     times = []
     # Measurement
-    psnr_list, ssim_list, lpips_list = [], [], []
-    ms_ssim_list, alex_lpips_list = [], []
+    mask_measure = False
+    l1_test, psnr_test, mask_psnr_test, ssim_test = [], [], [], []
+    jax_ssim_test, jax_mask_ssim_test = [], []
+    jax_lpips_test, jax_mask_lpips_test = [], []
 
     to8b = lambda x: (255 * np.clip(x, 0, 1)).astype(np.uint8)
     renderings = []
@@ -76,13 +88,27 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
         rendering = torch.clamp(torch.cat([results["render"], alpha]), 0.0, 1.0)
 
         # Measurement
-        image = rendering[:3]
-        gt_image = torch.clamp(view.original_image.to("cuda"), 0.0, 1.0)
-        psnr_list.append(psnr(image[None], gt_image[None]).mean())
-        ssim_list.append(ssim_func(image[None], gt_image[None], data_range=1.).mean())
-        lpips_list.append(lpips(image[None], gt_image[None]).mean())
-        ms_ssim_list.append(ms_ssim(image[None], gt_image[None], data_range=1.).mean())
-        alex_lpips_list.append(alex_lpips(image[None], gt_image[None]).mean())
+        if not skip_measure:
+            image = rendering[:3]
+            gt_image = torch.clamp(view.original_image.to("cuda"), 0.0, 1.0)
+            l1_test.append(l1_loss(image, gt_image).mean().double()) 
+            psnr_test.append(psnr(image, gt_image, mask=None).mean().double())
+
+            # jax
+            jax_render = jnp.array(image.permute(1,2,0).detach().cpu())
+            jax_gt = jnp.array(gt_image.permute(1,2,0).detach().cpu())
+            
+            jax_ssim_test.append(metrics.compute_ssim(jax_render, jax_gt))
+            jax_lpips_test.append(compute_lpips(jax_render, jax_gt))
+            
+            if name == 'test':    
+                if view.mask is not None:
+                    # psnr / ssim / lpips
+                    jax_mask = jnp.array(view.mask.permute(1,2,0).detach().cpu())                                            
+                    mask_psnr_test.append(psnr(image, gt_image, mask=view.mask.repeat(3,1,1)).mean().double())
+                    jax_mask_ssim_test.append(metrics.compute_ssim(jax_render, jax_gt, jax_mask))
+                    jax_mask_lpips_test.append(compute_lpips(jax_render, jax_gt, jax_mask))
+                    mask_measure=True
 
         renderings.append(to8b(rendering.cpu().numpy()))
         depth = results["depth"]
@@ -93,9 +119,10 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
             torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
             torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
             torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
-            renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
-            imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
-
+    
+    if not skip_image_save:
+        renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
+        imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
     times = times[1:]
     fps_mean1 = len(times) / np.sum(times)
@@ -103,50 +130,51 @@ def render_set(model_path, load2gpt_on_the_fly, name, iteration, views, gaussian
     print("FPS:",fps_mean1, fps_mean2)
 
     # Measurement
-    psnr_test = torch.stack(psnr_list).mean()
-    ssim_test = torch.stack(ssim_list).mean()
-    lpips_test = torch.stack(lpips_list).mean()
-    ms_ssim_test = torch.stack(ms_ssim_list).mean()
-    alex_lpips_test = torch.stack(alex_lpips_list).mean()
+    if not skip_measure:
+        psnr_test = torch.stack(psnr_test).mean()
+        jax_ssim_test = np.mean(jax_ssim_test)
+        jax_lpips_test = np.mean(jax_lpips_test)
 
-    if csv_path is not None:
-        fieldnames = ['exp', 'stage', 'iteration','FPS', 'pts_num', 'psnr', 'ssim', 'lpips', 'ms_ssim', 'alex_lpips']
+        if mask_measure:
+            mask_psnr_test = torch.stack(mask_psnr_test).mean()
+            jax_mask_ssim_test = np.mean(jax_mask_ssim_test)
+            jax_mask_lpips_test = np.mean(jax_mask_lpips_test)
+
+        if name == 'train':
+            prefix='t-'
+        else:
+            prefix=''
+
+        save_dict = {
+                    'exp': exp_name, 
+                    'stage': name, 
+                    'iteration': iteration,
+                    'FPS': fps_mean1,
+                    'pts_num': gaussians.get_xyz.size(0),
+                    f'{prefix}psnr': psnr_test.item(),
+                    f'{prefix}ssim': jax_ssim_test,
+                    f'{prefix}lpips': jax_lpips_test,
+                    }
+                    
+        if mask_measure: 
+            save_dict['m-psnr'] = mask_psnr_test.item()
+            save_dict['m-ssim'] = jax_mask_ssim_test
+            save_dict['m-lpips'] = jax_mask_lpips_test
+            
+        fieldnames = ['exp', 'stage', 'iteration','FPS', 'pts_num','psnr', 'm-psnr', 'ssim', 'm-ssim', 'lpips', 'm-lpips', 't-psnr', 't-ssim', 't-lpips']
+
         if not os.path.isfile(csv_path):
             with open(csv_path, 'w', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
-                writer.writerow({
-                                'exp': exp_name, 
-                                'stage': name, 
-                                'iteration': iteration,
-                                'FPS': fps_mean1,
-                                'pts_num': gaussians.get_xyz.size(0),
-                                'psnr': psnr_test.item(),
-                                'ssim': ssim_test.item(),
-                                'lpips': lpips_test.item(),
-                                'ms_ssim': ms_ssim_test.item(),
-                                'alex_lpips': alex_lpips_test.item()
-                                })
+                writer.writerow(save_dict)
         else:
             with open(csv_path, 'a', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames )
-                writer.writerow({
-                                'exp': exp_name, 
-                                'stage': name, 
-                                'iteration': iteration,
-                                'FPS': fps_mean1,
-                                'pts_num': gaussians.get_xyz.size(0),
-                                'psnr': psnr_test.item(),
-                                'ssim': ssim_test.item(),
-                                'lpips': lpips_test.item(),
-                                'ms_ssim': ms_ssim_test.item(),
-                                'alex_lpips': alex_lpips_test.item()
-                                })
+                writer.writerow(save_dict)
+        print(f"\n[ITER {iteration}] Evaluating {name}: PSNR {psnr_test} SSIM {jax_ssim_test} LPIPS {jax_lpips_test}")
 
-    print("\n[ITER {}] Evaluating {}: PSNR {} SSIM {} LPIPS {} MS SSIM{} ALEX_LPIPS {}".format(iteration, name, psnr_test, ssim_test, lpips_test, ms_ssim_test, alex_lpips_test))
-
-
-def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy', csv_path='dummy'):
+def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy'):
     render_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "depth")
 
@@ -181,7 +209,7 @@ def interpolate_time(model_path, load2gpt_on_the_fly, name, iteration, views, ga
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy',  csv_path='dummy'):
+def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gaussians, pipeline, background, deform, skip_image_save='dummy'):
     render_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "depth")
 
@@ -227,7 +255,7 @@ def interpolate_all(model_path, load2gpt_on_the_fly, name, iteration, views, gau
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, mode: str, load2device_on_the_fly=False, skip_image_save=False, csv_path=None):
+def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, mode: str, load2device_on_the_fly=False, skip_image_save=False, skip_measure=False):
     with torch.no_grad():
         
         deform = DeformModel(K=dataset.K, deform_type=dataset.deform_type, is_blender=dataset.is_blender, skinning=dataset.skinning, hyper_dim=dataset.hyper_dim, node_num=dataset.node_num, pred_opacity=dataset.pred_opacity, pred_color=dataset.pred_color, use_hash=dataset.use_hash, hash_time=dataset.hash_time, d_rot_as_res=dataset.d_rot_as_res, local_frame=dataset.local_frame, progressive_brand_time=dataset.progressive_brand_time, max_d_scale=dataset.max_d_scale)
@@ -248,10 +276,10 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
             render_func = interpolate_all
 
         if not skip_train:
-            render_func(dataset.model_path, load2device_on_the_fly, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, deform, skip_image_save, csv_path=csv_path)
+            render_func(dataset.model_path, load2device_on_the_fly, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, deform, skip_image_save, skip_measure)
 
         if not skip_test:
-            render_func(dataset.model_path, load2device_on_the_fly, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, deform, skip_image_save, csv_path=csv_path)
+            render_func(dataset.model_path, load2device_on_the_fly, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, deform, skip_image_save, skip_measure)
 
 
 if __name__ == "__main__":
@@ -266,7 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--skip_image_save", action="store_true")    
-    parser.add_argument("--csv_path", type=str)    
+    parser.add_argument("--skip_measure", action="store_true")    
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
     
@@ -295,4 +323,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode, load2device_on_the_fly=args.load2gpu_on_the_fly,
-                skip_image_save=args.skip_image_save, csv_path=args.csv_path)
+                skip_image_save=args.skip_image_save, skip_measure=args.skip_measure)
