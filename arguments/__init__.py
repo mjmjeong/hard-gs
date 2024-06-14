@@ -70,6 +70,7 @@ class ModelParams(ParamGroup):
         self.node_num = 1024
         self.pred_opacity = False
         self.pred_color = False
+        self.pred_scale = False
         self.use_hash = False
         self.hash_time = False
         self.d_rot_as_rotmat = False # Debug!!!

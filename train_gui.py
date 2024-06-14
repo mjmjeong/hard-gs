@@ -153,7 +153,7 @@ class GUI:
                                 use_hash=self.dataset.use_hash, hash_time=self.dataset.hash_time, d_rot_as_res=self.dataset.d_rot_as_res and not self.dataset.d_rot_as_rotmat, 
                                 local_frame=self.dataset.local_frame, progressive_brand_time=self.dataset.progressive_brand_time, with_arap_loss=not self.opt.no_arap_loss, 
                                 max_d_scale=self.dataset.max_d_scale, enable_densify_prune=self.opt.node_enable_densify_prune, is_scene_static=dataset.is_scene_static,
-                                poly_dim=self.args.poly_dim
+                                poly_dim=self.args.poly_dim, pred_scale=self.dataset.pred_scale
                                 )
         deform_loaded = self.deform.load_weights(dataset.model_path, iteration=-1)
         self.deform.train_setting(opt)

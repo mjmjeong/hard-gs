@@ -310,7 +310,7 @@ class StaticNetwork(nn.Module):
 
 class DeformNetwork(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, output_ch=59, t_multires=6, multires=10,
-                 is_blender=False, local_frame=False, pred_opacity=False, pred_color=False, resnet_color=True, hash_color=False, color_wrt_dir=False, progressive_brand_time=False, max_d_scale=-1, **kwargs):  # t_multires 6 for D-NeRF; 10 for HyperNeRF
+                 is_blender=False, local_frame=False, pred_opacity=False, pred_color=False, resnet_color=True, hash_color=False, color_wrt_dir=False, progressive_brand_time=False, max_d_scale=-1, pred_scale=False, **kwargs):  # t_multires 6 for D-NeRF; 10 for HyperNeRF
         super(DeformNetwork, self).__init__()
         self.name = 'mlp'
         self.D = D
@@ -331,6 +331,7 @@ class DeformNetwork(nn.Module):
 
         self.pred_opacity = pred_opacity
         self.pred_color = pred_color
+        self.pred_scale = pred_scale
         self.resnet_color = resnet_color
         self.hash_color = not resnet_color and hash_color
         self.color_wrt_dir = color_wrt_dir
@@ -421,13 +422,18 @@ class DeformNetwork(nn.Module):
                 h = torch.cat([x_emb, t_emb, h], -1)
 
         d_xyz = self.gaussian_warp(h)
-        scaling = self.gaussian_scaling(h)
+        if self.pred_scale:
+            scaling = self.gaussian_scaling(h)
+        else:
+            scaling = torch.zeros_like(d_xyz)
+        
         rotation = self.gaussian_rotation(h)
 
         if self.max_d_scale > 0:
             scaling = torch.tanh(scaling) * np.log(self.max_d_scale)
 
         return_dict = {'d_xyz': d_xyz, 'd_rotation': rotation, 'd_scaling': scaling, 'hidden': h}
+
         if self.pred_opacity:
             return_dict['d_opacity'] = self.gaussian_opacity(h)
         else:
@@ -736,6 +742,7 @@ class HashDeformNetwork(nn.Module):
         self.pred_color = pred_color
         if self.pred_color:
             self.color_layer = MLP(dim_in=hidden_dim, dim_out=3, n_neurons=64, n_hidden_layers=1)
+        self.pred_scale = pred_scale
 
     def forward(self, x, t, **kwargs):
         x = contract_to_unisphere(x, bbox=self.bbox, unbounded=False)
@@ -815,7 +822,7 @@ class PolyDeformNetwork(nn.Module):
         return
 
 class ControlNodeWarp(nn.Module):
-    def __init__(self, is_blender, init_pcl=None, node_num=512, K=3, use_hash=False, hash_time=False, enable_densify_prune=False, pred_opacity=False, pred_color=False, with_arap_loss=False, with_node_weight=True, local_frame=False, d_rot_as_res=True, skinning=False, hyper_dim=2, progressive_brand_time=False, max_d_scale=-1, is_scene_static=False, **kwargs):
+    def __init__(self, is_blender, init_pcl=None, node_num=512, K=3, use_hash=False, hash_time=False, enable_densify_prune=False, pred_opacity=False, pred_color=False, pred_scale=False, with_arap_loss=False, with_node_weight=True, local_frame=False, d_rot_as_res=True, skinning=False, hyper_dim=2, progressive_brand_time=False, max_d_scale=-1, is_scene_static=False, **kwargs):
         super().__init__()
         self.K = K
         self.use_hash = use_hash
@@ -830,6 +837,8 @@ class ControlNodeWarp(nn.Module):
         self.is_blender = is_blender
         self.pred_opacity = pred_opacity
         self.pred_color = pred_color
+        self.pred_scale = pred_scale
+        
         self.max_d_scale = max_d_scale
         self.is_scene_static = is_scene_static
         self._check = 'tes'
@@ -846,9 +855,9 @@ class ControlNodeWarp(nn.Module):
         if self.is_scene_static:
             self.network = StaticNetwork(return_tensors=True)
         elif use_hash:
-            self.network = HashDeformNetwork(local_frame=local_frame, pred_opacity=pred_opacity, pred_color=pred_color, hash_time=hash_time).cuda()
+            self.network = HashDeformNetwork(local_frame=local_frame, pred_opacity=pred_opacity, pred_color=pred_color, hash_time=hash_time, pred_scale=pred_scale).cuda()
         else:
-            self.network = DeformNetwork(is_blender=is_blender, local_frame=local_frame, pred_opacity=pred_opacity, pred_color=pred_color, progressive_brand_time=progressive_brand_time, max_d_scale=max_d_scale).cuda()
+            self.network = DeformNetwork(is_blender=is_blender, local_frame=local_frame, pred_opacity=pred_opacity, pred_color=pred_color, progressive_brand_time=progressive_brand_time, max_d_scale=max_d_scale, pred_scale=pred_scale).cuda()
         
         self.register_buffer('inited', torch.tensor(False))
         self.nodes = nn.Parameter(torch.randn(node_num, 3+self.hyper_dim))
@@ -1277,6 +1286,9 @@ class ControlNodeWarp(nn.Module):
             return_dict['d_color'] = d_color
         else:
             return_dict['d_color'] = None
+
+        if not self.pred_scale: 
+            return_dict['d_scaling'] = torch.zeros_like(return_dict['d_scaling'])
 
         self.reg_loss = 0.
         lambda_arap = landmark_interpolate(landmarks=self.lambda_arap_landmarks, steps=self.lambda_arap_steps, step=iteration)
